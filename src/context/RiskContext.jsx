@@ -1,5 +1,6 @@
 /* eslint-disable react-refresh/only-export-components */
 import {createContext, useContext, useEffect, useMemo, useRef, useState} from 'react'
+import {fetchRecentCustomers, fetchSummary} from '../utils/backend'
 import {createRiskSocket, socketReferenceData} from '../utils/socket'
 
 const RiskContext = createContext(null)
@@ -31,6 +32,15 @@ function pick(list) {
 
 function randomBetween(min, max) {
     return Math.random() * (max - min) + min
+}
+
+function parseNumber(value, fallback = 0) {
+    if (typeof value === 'number' && !Number.isNaN(value)) return value
+    if (typeof value === 'string') {
+        const parsed = Number.parseFloat(value)
+        if (!Number.isNaN(parsed)) return parsed
+    }
+    return fallback
 }
 
 function determineRiskLevel(score) {
@@ -187,22 +197,137 @@ export function RiskProvider({ children }) {
 
     useEffect(() => {
         let isActive = true
-        async function loadSummary() {
+        const controller = new AbortController()
+
+        async function loadBackendData() {
             try {
-                const response = await fetch('/api/risk-summary')
-                if (!response.ok) throw new Error('placeholder not available')
-                const data = await response.json()
+                const [summaryResponse, customersResponse] = await Promise.all([
+                    fetchSummary({ signal: controller.signal }),
+                    fetchRecentCustomers({ signal: controller.signal }),
+                ])
+
                 if (!isActive) return
-                if (data?.summary) {
-                    setSummary((current) => ({ ...current, ...data.summary }))
+
+                if (summaryResponse) {
+                    setSummary((current) => {
+                        const averageRiskValue = summaryResponse.average_risk_score
+                        const normalizedAverage =
+                            typeof averageRiskValue === 'number'
+                                ? averageRiskValue <= 1
+                                    ? averageRiskValue * 100
+                                    : averageRiskValue
+                                : current.averageRisk
+
+                        return {
+                            ...current,
+                            averageRisk:
+                                typeof normalizedAverage === 'number'
+                                    ? Math.round(normalizedAverage * 10) / 10
+                                    : current.averageRisk,
+                            fraudAlerts:
+                                typeof summaryResponse.total_alerts === 'number'
+                                    ? summaryResponse.total_alerts
+                                    : current.fraudAlerts,
+                            activeCustomers:
+                                typeof summaryResponse.total_customers === 'number'
+                                    ? summaryResponse.total_customers
+                                    : current.activeCustomers,
+                        }
+                    })
                 }
-            } catch {
-                // Placeholder for future integration - safely ignored for now
+
+                if (Array.isArray(customersResponse?.customers) && customersResponse.customers.length) {
+                    let snapshot = null
+                    setCustomers((current) => {
+                        const map = new Map(current.map((customer) => [customer.id, customer]))
+
+                        customersResponse.customers.forEach((entry) => {
+                            if (!entry || typeof entry !== 'object') return
+                            const identifier =
+                                entry.customer_id || entry.customerId || entry.id || entry.identifier || entry.account_id
+                            if (typeof identifier !== 'string') return
+                            const existing = map.get(identifier)
+                            const riskRaw =
+                                entry.risk_score ??
+                                entry.riskScore ??
+                                entry.score ??
+                                entry.customer_risk_score ??
+                                (existing ? existing.riskScore : 0)
+                            const riskScore = Math.round(Math.min(99, Math.max(0, parseNumber(riskRaw, 0))) * 10) / 10
+                            const repaymentRaw =
+                                entry.loan_repayment_rate ?? entry.loanRepaymentRate ?? (existing ? existing.loanRepaymentRate : 0.82)
+                            const repaymentRate = Math.round(Math.min(Math.max(parseNumber(repaymentRaw, 0.82), 0), 1) * 1000) / 1000
+                            const location =
+                                entry.customer_location ||
+                                entry.customerLocation ||
+                                entry.location ||
+                                (existing ? existing.location : pick(LOCATIONS))
+                            const loanProduct =
+                                entry.loan_product || entry.loanProduct || (existing ? existing.loanProduct : pick(LOAN_PRODUCTS))
+
+                            const base =
+                                existing || {
+                                    id: identifier,
+                                    name:
+                                        entry.customer_name ||
+                                        entry.customerName ||
+                                        entry.customer_label ||
+                                        entry.name ||
+                                        identifier,
+                                    balance: existing?.balance ?? Math.round(randomBetween(5200, 98000)),
+                                    lastActivity: Date.now(),
+                                    loanProduct,
+                                    loanExposure: existing?.loanExposure ?? Math.round(randomBetween(15000, 120000)),
+                                    loanRepaymentRate: repaymentRate,
+                                    paypalAlerts: existing?.paypalAlerts ?? 0,
+                                    totalPayments: existing?.totalPayments ?? Math.round(randomBetween(45000, 210000)),
+                                    location,
+                                }
+
+                            map.set(identifier, {
+                                ...base,
+                                riskScore,
+                                riskLevel: determineRiskLevel(riskScore),
+                                lastActivity: Date.now(),
+                                loanRepaymentRate: repaymentRate,
+                                loanProduct,
+                                location,
+                            })
+                        })
+
+                        const next = Array.from(map.values())
+                        customersRef.current = next
+                        snapshot = next
+                        return next
+                    })
+
+                    if (snapshot) {
+                        const latest = snapshot
+                        setLoanPerformance((current) => {
+                            const map = new Map(current.map((entry) => [entry.id, entry]))
+                            latest.forEach((customer) => {
+                                map.set(customer.id, {
+                                    id: customer.id,
+                                    name: customer.name,
+                                    rate: customer.loanRepaymentRate,
+                                    product: customer.loanProduct,
+                                })
+                            })
+                            return Array.from(map.values())
+                        })
+                    }
+                }
+            } catch (error) {
+                if (error?.name === 'AbortError') return
+                 
+                console.warn('Failed to load initial risk data from backend', error)
             }
         }
-        loadSummary()
+
+        loadBackendData()
         return () => {
             isActive = false
+            controller.abort()
         }
     }, [])
 

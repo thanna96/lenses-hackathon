@@ -1,3 +1,5 @@
+import { getWebSocketUrl } from './backend'
+
 export type RiskEvent = {
     customer_id: string
     customer_name: string
@@ -468,26 +470,159 @@ function buildEvent(): RiskEvent {
     return normalizeRecord(record)
 }
 
-export function createRiskSocket(intervalMs = 2500) {
-    const listeners = new Set<Listener>()
+function coerceNumber(value: unknown, fallback = 0) {
+    if (typeof value === 'number' && !Number.isNaN(value)) return value
+    if (typeof value === 'string') {
+        const parsed = Number.parseFloat(value)
+        if (!Number.isNaN(parsed)) return parsed
+    }
+    return fallback
+}
+
+function normalizeTimestamp(value: unknown) {
+    if (typeof value === 'number') return value
+    if (typeof value === 'string') {
+        const parsed = Date.parse(value)
+        if (!Number.isNaN(parsed)) return parsed
+    }
+    return Date.now()
+}
+
+function normalizeIncomingEvent(payload: Record<string, unknown>): RiskEvent | null {
+    const customerId = (payload.customer_id as string) || (payload.customerId as string)
+    const merchantId = (payload.merchant_id as string) || (payload.merchantId as string) || 'unknown'
+
+    if (!customerId) {
+        return null
+    }
+
+    const rawRisk =
+        payload.risk_score ?? payload.riskScore ?? payload.score ?? payload.customer_risk_score ?? payload['risk-score']
+    const riskScore = Math.round(Math.min(99, Math.max(0, coerceNumber(rawRisk, 0))))
+    const repaymentRate = coerceNumber(payload.loan_repayment_rate ?? payload.loanRepaymentRate, 0.82)
+    const amount = coerceNumber(payload.transaction_amount ?? payload.transactionAmount ?? payload.amount, 0)
+
+    return {
+        customer_id: customerId,
+        customer_name:
+            (payload.customer_name as string) ||
+            (payload.customerName as string) ||
+            (payload.customer_label as string) ||
+            customerId,
+        customer_location: (payload.customer_location as string) || (payload.location as string),
+        loan_product: (payload.loan_product as string) || (payload.loanProduct as string),
+        risk_score: Math.round(riskScore * 10) / 10,
+        loan_repayment_rate: Math.min(Math.max(repaymentRate, 0), 1),
+        paypal_alert: Boolean(payload.paypal_alert ?? payload.paypalAlert ?? payload.alert ?? false),
+        transaction_amount: amount,
+        merchant_id: merchantId,
+        merchant_name:
+            (payload.merchant_name as string) ||
+            (payload.merchantName as string) ||
+            (payload.merchant_label as string) ||
+            merchantId,
+        merchant_category:
+            (payload.merchant_category as string) ||
+            (payload.merchantCategory as string) ||
+            (payload.category as string) ||
+            'General',
+        timestamp: normalizeTimestamp(payload.timestamp ?? payload.event_time ?? payload.created_at),
+    }
+}
+
+function createSimulator(intervalMs: number, emit: (event: RiskEvent) => void) {
     let timer: ReturnType<typeof setInterval> | undefined
 
-    function start() {
-        if (timer) return
-        timer = setInterval(() => {
-            const event = buildEvent()
-            listeners.forEach((listener) => listener(event))
-        }, intervalMs)
-    }
-
-    function stop() {
-        if (timer) {
+    return {
+        start() {
+            if (timer) return
+            timer = setInterval(() => {
+                emit(buildEvent())
+            }, intervalMs)
+        },
+        stop() {
+            if (!timer) return
             clearInterval(timer)
             timer = undefined
-        }
+        },
+    }
+}
+
+export function createRiskSocket(intervalMs = 2500) {
+    const listeners = new Set<Listener>()
+    const simulator = createSimulator(intervalMs, (event) => {
+        listeners.forEach((listener) => listener(event))
+    })
+
+    let socket: WebSocket | null = null
+    let closed = false
+
+    const emit = (event: RiskEvent) => {
+        listeners.forEach((listener) => listener(event))
     }
 
-    start()
+    const connectWebSocket = () => {
+        if (typeof window === 'undefined' || !('WebSocket' in window)) {
+            simulator.start()
+            return
+        }
+
+        const url = getWebSocketUrl()
+        if (!url) {
+            simulator.start()
+            return
+        }
+
+        try {
+            socket = new WebSocket(url)
+        } catch (error) {
+            simulator.start()
+            return
+        }
+
+        socket.addEventListener('open', () => {
+            if (closed) return
+            simulator.stop()
+        })
+
+        socket.addEventListener('message', (event) => {
+            try {
+                const parsed = JSON.parse(event.data as string)
+                const payload = (parsed && typeof parsed === 'object' ? parsed.data ?? parsed : null) as
+                    | Record<string, unknown>
+                    | null
+                if (payload) {
+                    const normalized = normalizeIncomingEvent(payload)
+                    if (normalized) {
+                        emit(normalized)
+                    }
+                }
+            } catch (error) {
+                // Ignore malformed frames
+            }
+        })
+
+        const restart = () => {
+            if (closed) return
+            socket = null
+            simulator.start()
+        }
+
+        socket.addEventListener('close', restart)
+        socket.addEventListener('error', () => {
+            if (socket) {
+                try {
+                    socket.close()
+                } catch (error) {
+                    // Ignore
+                }
+            }
+            restart()
+        })
+    }
+
+    connectWebSocket()
+    simulator.start()
 
     return {
         subscribe(listener: Listener) {
@@ -495,8 +630,17 @@ export function createRiskSocket(intervalMs = 2500) {
             return () => listeners.delete(listener)
         },
         close() {
-            stop()
+            closed = true
+            simulator.stop()
             listeners.clear()
+            if (socket) {
+                try {
+                    socket.close()
+                } catch (error) {
+                    // Ignore errors closing the socket
+                }
+                socket = null
+            }
         },
     }
 }
