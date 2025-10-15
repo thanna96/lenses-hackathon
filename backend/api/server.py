@@ -11,7 +11,9 @@ from typing import Callable, Dict, List
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from confluent_kafka import Consumer
+
+from confluent_kafka import Consumer as KafkaConsumer
+from confluent_kafka import KafkaError
 from uvicorn import Config, Server
 
 from ..agents.notification_agent import NotificationAgent
@@ -121,7 +123,6 @@ def _log_future(future: asyncio.Future) -> None:
     except Exception as exc:  # pragma: no cover - diagnostic helper
         LOGGER.exception("Background task failed: %s", exc)
 
-
 def start_consumer_thread(
     *,
     topic: str,
@@ -131,25 +132,38 @@ def start_consumer_thread(
 ) -> None:
     def run() -> None:
         LOGGER.info("Starting Kafka watcher for topic %s", topic)
-        consumer = Consumer(
-            topic,
-            bootstrap_servers=settings.bootstrap_servers,
-            group_id=group,
-            value_deserializer=lambda m: json.loads(m.decode("utf-8")),
-            auto_offset_reset="latest",
-            enable_auto_commit=True,
+        consumer = KafkaConsumer(
+            {
+                "bootstrap.servers": settings.bootstrap_servers,
+                "group.id": group,
+                "auto.offset.reset": settings.auto_offset_reset,
+                "enable.auto.commit": True,
+            }
         )
+        consumer.subscribe([topic])
         try:
             while not _stop_event.is_set():
-                for message in consumer:
-                    if _stop_event.is_set():
-                        break
-                    payload = message.value
-                    future = handler(payload)
-                    if isinstance(future, (asyncio.Future, Future)):
-                        future.add_done_callback(_log_future)
-                if _stop_event.is_set():
-                    break
+                message = consumer.poll(1.0)
+                if message is None:
+                    continue
+                if message.error():
+                    if message.error().code() != KafkaError._PARTITION_EOF:
+                        LOGGER.warning(
+                            "Kafka error on topic %s: %s", topic, message.error()
+                        )
+                    continue
+                raw_value = message.value()
+                if raw_value is None:
+                    LOGGER.debug("Received empty payload from topic %s", topic)
+                    continue
+                try:
+                    payload = json.loads(raw_value.decode("utf-8"))
+                except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                    LOGGER.warning("Invalid payload from topic %s: %s", topic, exc)
+                    continue
+                future = handler(payload)
+                if isinstance(future, (asyncio.Future, Future)):
+                    future.add_done_callback(_log_future)
         finally:
             consumer.close()
             LOGGER.info("Stopped Kafka watcher for topic %s", topic)
