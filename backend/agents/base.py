@@ -8,7 +8,7 @@ import threading
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Iterable, Optional
 
-from kafka import KafkaConsumer, KafkaProducer
+from confluent_kafka import Consumer, Producer
 
 
 LOGGER = logging.getLogger(__name__)
@@ -61,32 +61,46 @@ class BaseAgent(ABC):
         self.kafka_bootstrap_servers = kafka_bootstrap_servers
         self.consumer_group = consumer_group
         self.auto_offset_reset = auto_offset_reset
-        self._consumer: Optional[KafkaConsumer] = None
-        self._producer: Optional[KafkaProducer] = None
+        self._consumer: Optional[Consumer] = None
+        self._producer: Optional[Producer] = None
         self._shutdown = GracefulShutdown()
-
-    @property
-    def consumer(self) -> KafkaConsumer:
+ @property
+    def consumer(self) -> CConsumer:
+        """
+        confluent-kafka Consumer:
+        - create with a config dict
+        - then .subscribe(topics)
+        - do JSON decoding after poll()
+        """
         if self._consumer is None:
-            self._consumer = KafkaConsumer(
-                *self.consumer_topics,
-                bootstrap_servers=self.kafka_bootstrap_servers,
-                group_id=self.consumer_group,
-                value_deserializer=lambda m: json.loads(m.decode("utf-8")),
-                auto_offset_reset=self.auto_offset_reset,
-                enable_auto_commit=True,
-            )
+            conf = {
+                "bootstrap.servers": self.kafka_bootstrap_servers,
+                "group.id": self.consumer_group,
+                "auto.offset.reset": self.auto_offset_reset,  # "earliest"/"latest"
+                "enable.auto.commit": True,
+            }
+            self._consumer = CConsumer(conf)
+            # Subscribe to topics after constructing the consumer
+            if not getattr(self, "consumer_topics", None):
+                raise RuntimeError("consumer_topics is empty for this agent")
+            self._consumer.subscribe(self.consumer_topics)
         return self._consumer
 
     @property
-    def producer(self) -> KafkaProducer:
+    def producer(self) -> CProducer:
+        """
+        confluent-kafka Producer:
+        - create with config dict
+        - call .produce(topic, value=bytes/str, key=optional)
+        - JSON encoding done by helper below
+        """
         if self.producer_topic is None:
             raise RuntimeError("Producer topic is not configured for this agent")
         if self._producer is None:
-            self._producer = KafkaProducer(
-                bootstrap_servers=self.kafka_bootstrap_servers,
-                value_serializer=lambda v: json.dumps(v).encode("utf-8"),
-            )
+            conf = {
+                "bootstrap.servers": self.kafka_bootstrap_servers,
+            }
+            self._producer = CProducer(conf)
         return self._producer
 
     def run(self) -> None:

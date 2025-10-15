@@ -11,7 +11,7 @@ from typing import Callable, Dict, List
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from kafka import KafkaConsumer
+from confluent_kafka import Consumer
 from uvicorn import Config, Server
 
 from ..agents.notification_agent import NotificationAgent
@@ -131,7 +131,7 @@ def start_consumer_thread(
 ) -> None:
     def run() -> None:
         LOGGER.info("Starting Kafka watcher for topic %s", topic)
-        consumer = KafkaConsumer(
+        consumer = Consumer(
             topic,
             bootstrap_servers=settings.bootstrap_servers,
             group_id=group,
