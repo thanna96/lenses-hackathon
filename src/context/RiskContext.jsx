@@ -1,11 +1,33 @@
 /* eslint-disable react-refresh/only-export-components */
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import { createRiskSocket, socketReferenceData } from '../utils/socket'
+import {createContext, useContext, useEffect, useMemo, useRef, useState} from 'react'
+import {createRiskSocket, socketReferenceData} from '../utils/socket'
 
 const RiskContext = createContext(null)
+const LOCATIONS = [
+    'London, UK',
+    'New York, USA',
+    'Singapore',
+    'Berlin, DE',
+    'Toronto, CA',
+    'Lisbon, PT',
+    'San Diego, AZ',
+    'Phoenix, TX',
+    'Philadelphia, FL',
+]
+const LOAN_PRODUCTS = [
+    'SMB Flex Loan',
+    'Invoice Advance',
+    'Growth Credit',
+    'Merchant Cash Boost',
+    'Revolving Credit',
+    'Auto Finance',
+    'Mortgage Servicing',
+    'PayPal Commerce',
+]
 
-const LOCATIONS = ['London, UK', 'New York, USA', 'Singapore', 'Berlin, DE', 'Toronto, CA', 'Lisbon, PT']
-const LOAN_PRODUCTS = ['SMB Flex Loan', 'Invoice Advance', 'Growth Credit', 'Merchant Cash Boost']
+function pick(list) {
+    return list[Math.floor(Math.random() * list.length)]
+}
 
 function randomBetween(min, max) {
     return Math.random() * (max - min) + min
@@ -34,12 +56,12 @@ const baseCustomers = socketReferenceData.customers.map((customer, index) => {
         riskLevel: determineRiskLevel(riskScore),
         balance: Math.round(randomBetween(5200, 98000)),
         lastActivity: Date.now() - Math.floor(randomBetween(2, 48)) * 3600 * 1000,
-        loanProduct: LOAN_PRODUCTS[index % LOAN_PRODUCTS.length],
+        loanProduct: customer.loan_product_hint || LOAN_PRODUCTS[index % LOAN_PRODUCTS.length],
         loanExposure: Math.round(randomBetween(15000, 120000)),
         loanRepaymentRate: Math.round(randomBetween(0.72, 0.94) * 1000) / 1000,
         paypalAlerts: 0,
         totalPayments: Math.round(randomBetween(45000, 210000)),
-        location: LOCATIONS[index % LOCATIONS.length],
+        location: customer.region || LOCATIONS[index % LOCATIONS.length],
     }
 })
 
@@ -58,6 +80,54 @@ const baseMerchants = socketReferenceData.merchants.map((merchant) => {
         lastAlert: Date.now() - Math.floor(randomBetween(1, 18)) * 3600 * 1000,
     }
 })
+
+
+function inferLoanProductFromEvent(event) {
+    if (event.loan_product) return event.loan_product
+    const category = (event.merchant_category || '').toLowerCase()
+    if (category.includes('auto')) return 'Auto Finance'
+    if (category.includes('mortgage') || category.includes('home')) return 'Mortgage Servicing'
+    if (category.includes('paypal')) return 'PayPal Commerce'
+    if (category.includes('loan')) return 'SMB Flex Loan'
+    return 'Growth Credit'
+}
+
+function createCustomerFromEvent(event) {
+    const sanitizedRisk = Math.round(Math.min(99, Math.max(5, event.risk_score)) * 10) / 10
+    const normalizedRate =
+        typeof event.loan_repayment_rate === 'number'
+            ? Math.round(Math.min(0.99, Math.max(0.4, event.loan_repayment_rate)) * 1000) / 1000
+            : Math.round(randomBetween(0.72, 0.94) * 1000) / 1000
+    return {
+        id: event.customer_id,
+        name: event.customer_name || event.customer_id,
+        riskScore: sanitizedRisk,
+        riskLevel: determineRiskLevel(sanitizedRisk),
+        balance: Math.round(randomBetween(5200, 98000)),
+        lastActivity: event.timestamp,
+        loanProduct: inferLoanProductFromEvent(event),
+        loanExposure: Math.round(randomBetween(15000, 120000)),
+        loanRepaymentRate: normalizedRate,
+        paypalAlerts: event.paypal_alert ? 1 : 0,
+        totalPayments: Math.round(event.transaction_amount || 0),
+        location: event.customer_location || pick(LOCATIONS),
+    }
+}
+
+function createMerchantFromEvent(event) {
+    const baseFraud = Math.round((Math.min(6, Math.max(0.8, event.risk_score / 18)) * 10)) / 10
+    return {
+        id: event.merchant_id,
+        name: event.merchant_name || event.merchant_id,
+        category: event.merchant_category || 'General',
+        riskLevel: baseFraud > 4 ? 'Critical' : baseFraud > 3 ? 'High' : baseFraud > 2 ? 'Elevated' : 'Stable',
+        fraudRate: baseFraud,
+        disputes: event.paypal_alert ? 1 : 0,
+        transactionVolume: Math.max(2500, Math.round((event.transaction_amount || 0) * 6)),
+        averageTicket: Math.max(12, Math.round(event.transaction_amount || randomBetween(40, 420))),
+        lastAlert: event.timestamp,
+    }
+}
 
 const initialSummary = {
     activeCustomers: baseCustomers.length,
@@ -145,42 +215,61 @@ export function RiskProvider({ children }) {
                 return next.slice(-60)
             })
 
-            const currentCustomers = customersRef.current
-            let updatedCustomers = currentCustomers
+            let updatedCustomers = customersRef.current
             setCustomers((prev) => {
+                let found = false
                 const mapped = prev.map((customer) => {
                     if (customer.id !== event.customer_id) return customer
+                    found = true
                     const updatedRisk = Math.round((customer.riskScore * 2 + event.risk_score) / 3)
                     const adjustedRisk = Math.min(99, Math.max(5, updatedRisk + (event.paypal_alert ? 6 : 0)))
+                    const normalizedRate =
+                        typeof event.loan_repayment_rate === 'number'
+                            ? Math.round(((customer.loanRepaymentRate * 4 + event.loan_repayment_rate) / 5) * 1000) / 1000
+                            : customer.loanRepaymentRate
                     return {
                         ...customer,
                         riskScore: Math.round(adjustedRisk * 10) / 10,
                         riskLevel: determineRiskLevel(adjustedRisk),
                         lastActivity: event.timestamp,
-                        loanRepaymentRate: Math.round(((customer.loanRepaymentRate * 4 + event.loan_repayment_rate) / 5) * 1000) / 1000,
+                        loanRepaymentRate: normalizedRate,
                         paypalAlerts: customer.paypalAlerts + (event.paypal_alert ? 1 : 0),
-                        totalPayments: customer.totalPayments + event.transaction_amount,
+                        totalPayments: customer.totalPayments + (event.transaction_amount || 0),
+                        loanProduct: event.loan_product || customer.loanProduct,
+                        location: event.customer_location || customer.location,
                     }
                 })
+                if (!found) {
+                    const created = createCustomerFromEvent(event)
+                    const combined = [...mapped, created]
+                    updatedCustomers = combined
+                    customersRef.current = combined
+                    return combined
+                }
                 updatedCustomers = mapped
                 customersRef.current = mapped
                 return mapped
             })
 
             setMerchants((prev) => {
+                let found = false
                 const mapped = prev.map((merchant) => {
                     if (merchant.id !== event.merchant_id) return merchant
+                    found = true
                     const nextDisputes = merchant.disputes + (event.paypal_alert ? 1 : 0)
                     const updatedFraud = Math.round((merchant.fraudRate * 0.9 + (event.paypal_alert ? 4.5 : 1.8)) * 10) / 10
                     return {
                         ...merchant,
-                        transactionVolume: merchant.transactionVolume + event.transaction_amount,
+                        transactionVolume: merchant.transactionVolume + (event.transaction_amount || 0),
                         fraudRate: Math.min(6, updatedFraud),
                         riskLevel: updatedFraud > 4 ? 'Critical' : updatedFraud > 3 ? 'High' : updatedFraud > 2 ? 'Elevated' : 'Stable',
                         disputes: nextDisputes,
                         lastAlert: event.timestamp,
                     }
                 })
+                if (!found && event.merchant_id) {
+                    return [...mapped, createMerchantFromEvent(event)]
+                }
                 return mapped
             })
 
@@ -192,7 +281,7 @@ export function RiskProvider({ children }) {
                 activeCustomers: updatedCustomers.filter((item) => item.riskScore < 80).length,
                 averageRisk,
                 fraudAlerts: current.fraudAlerts + (event.paypal_alert ? 1 : 0) + (event.risk_score > 82 ? 1 : 0),
-                totalPayments: current.totalPayments + event.transaction_amount,
+                totalPayments: current.totalPayments + (event.transaction_amount || 0),
             }))
 
             setTrend((current) => {
@@ -201,23 +290,55 @@ export function RiskProvider({ children }) {
             })
 
             setLoanPerformance((current) => {
+                const normalizedRate =
+                    typeof event.loan_repayment_rate === 'number'
+                        ? Math.round(event.loan_repayment_rate * 1000) / 1000
+                        : Math.round(randomBetween(0.7, 0.92) * 1000) / 1000
                 const exists = current.find((item) => item.id === event.customer_id)
-                const updated = exists
-                    ? current.map((item) =>
+                if (exists) {
+                    return current.map((item) =>
                         item.id === event.customer_id
                             ? {
                                 ...item,
-                                rate: Math.round(((item.rate * 6 + event.loan_repayment_rate) / 7) * 1000) / 1000,
+                                rate: Math.round(((item.rate * 6 + normalizedRate) / 7) * 1000) / 1000,
+                                product: event.loan_product || item.product,
                             }
                             : item,
                     )
-                    : current
-                return updated
+                }
+                return [
+                    ...current,
+                    {
+                        id: event.customer_id,
+                        name: event.customer_name,
+                        rate: normalizedRate,
+                        product: inferLoanProductFromEvent(event),
+                    },
+                ]
             })
 
             if (event.paypal_alert || event.risk_score >= 82) {
                 const severity = event.risk_score >= 90 ? 'critical' : event.paypal_alert ? 'high' : 'medium'
                 setAlerts((current) => {
+                    const next = [
+                        {
+                            id: `ALT-${event.timestamp}`,
+                            title:
+                                severity === 'critical'
+                                    ? 'Critical Fraud Risk'
+                                    : event.paypal_alert
+                                        ? 'PayPal Alert Detected'
+                                        : 'Elevated Risk Movement',
+                            message: `${event.customer_name} reported a score of ${event.risk_score} via ${event.merchant_name}.`,
+                            severity,
+                            merchant: event.merchant_name,
+                            timestamp: event.timestamp,
+                        },
+                        ...current,
+                    ]
+                    return next.slice(0, 25)
+                })
+                setPaypalActivity((current) => {
                     const next = [
                         {
                             id: `ALT-${event.timestamp}`,

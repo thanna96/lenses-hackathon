@@ -48,7 +48,7 @@ function PaypalActivityPanel() {
                             <p className="text-xs text-muted-400">{entry.merchant}</p>
                         </div>
                         <div className="text-right">
-                            <p className="font-semibold text-risk-high">${entry.amount.toLocaleString()}</p>
+                            <p className="font-semibold text-risk-high">${entry.amount?.toLocaleString()}</p>
                             <p className="text-xs text-muted-400">Risk {entry.riskScore}</p>
                         </div>
                     </div>
