@@ -1,0 +1,7 @@
+KAFKA_BROKERS=localhost:29092
+OPENAI_API_KEY=sk-xxx
+OPENAI_MODEL=gpt-4o-mini
+CLIENT_ORIGIN=http://localhost:5173
+PORT=4000
+SERVICE_ROLE=api
+CONSUMER_GROUP_PREFIX=unified-risk
