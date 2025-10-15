@@ -1,7 +1,12 @@
-KAFKA_BROKERS=localhost:29092
-OPENAI_API_KEY=sk-xxx
-OPENAI_MODEL=gpt-5-nano
-CLIENT_ORIGIN=http://localhost:5173
-PORT=4000
-SERVICE_ROLE=api
-CONSUMER_GROUP_PREFIX=unified-risk
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+ENV PYTHONUNBUFFERED=1
+
+CMD ["python", "-m", "backend.app"]
