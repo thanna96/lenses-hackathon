@@ -1,6 +1,7 @@
 # Lenses Hackathon Risk Operations Dashboard
 
 A live risk operations dashboard built for the Lenses hackathon. The app simulates a fintech control center where risk analysts monitor customer health, merchant exposure, and PayPal escalations in real time. It is implemented with React 19, Vite, and Tailwind CSS, and ships with a mock socket layer that continuously updates the UI with realistic transaction data.
+<img width="1767" height="889" alt="Screenshot 2025-10-16 at 4 59 42 PM" src="https://github.com/user-attachments/assets/30b21474-cadb-4c5e-8b5b-f12cb9b44917" />
 
 ## Features
 
